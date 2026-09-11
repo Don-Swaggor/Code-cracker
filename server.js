@@ -15,7 +15,6 @@ const PORT = process.env.PORT || 3000;
 // GAME SETTINGS
 // ===============================
 
-const TURN_TIME = 30;
 const ROOM_CODE_LENGTH = 4;
 const ROOM_CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const MIN_GROUP_PLAYERS = 3;
@@ -68,7 +67,12 @@ function cleanName(name) {
 // ===============================
 
 function validCode(code) {
-    return typeof code === "string" && /^\d{4}$/.test(code);
+    if (typeof code !== "string" || !/^\d{4}$/.test(code)) {
+        return false;
+    }
+
+    // Every digit must be different. Example: 1234 is valid, 1123 is not.
+    return new Set(code).size === 4;
 }
 
 // ===============================
@@ -221,8 +225,6 @@ function createRoom(socket, name, mode, maxPlayers) {
         turnIndex: 0,
         started: false,
         winner: null,
-        timer: null,
-        turnEndsAt: null
     };
 
     socket.join(roomCode);
@@ -241,28 +243,19 @@ function lockRoomForCodes(roomCode) {
 }
 
 // ===============================
-// TURN TIMER
+// TURN MANAGEMENT
 // ===============================
 
 function startTurn(roomCode) {
     const room = rooms[roomCode];
     if (!room || room.winner) return;
 
-    clearTimeout(room.timer);
-
     const currentId = room.order[room.turnIndex];
 
-    room.turnEndsAt = Date.now() + TURN_TIME * 1000;
-
+    // No countdown or automatic timeout. A turn lasts until the player makes a guess.
     io.to(roomCode).emit("turnStarted", {
-        turn: currentId,
-        seconds: TURN_TIME,
-        endsAt: room.turnEndsAt
+        turn: currentId
     });
-
-    room.timer = setTimeout(() => {
-        handleTimeout(roomCode);
-    }, TURN_TIME * 1000);
 }
 
 function advanceTurn(roomCode) {
@@ -274,34 +267,6 @@ function advanceTurn(roomCode) {
 
     room.turnIndex = nextIdx;
     startTurn(roomCode);
-}
-
-function handleTimeout(roomCode) {
-    const room = rooms[roomCode];
-    if (!room || room.winner || !room.started) return;
-
-    const timedOutId = room.order[room.turnIndex];
-
-    if (room.mode === "duo") {
-
-        const opponentId = room.order.find((id) => id !== timedOutId);
-
-        room.winner = opponentId;
-        clearTimeout(room.timer);
-
-        io.to(roomCode).emit("gameOver", {
-            winner: opponentId,
-            reason: "timeout",
-            timedOutPlayer: timedOutId
-        });
-
-        return;
-    }
-
-    // Group mode: a timeout just costs you the turn, not the game.
-    io.to(roomCode).emit("turnSkipped", { player: timedOutId });
-
-    advanceTurn(roomCode);
 }
 
 // ===============================
@@ -321,7 +286,6 @@ function handlePlayerLeft(roomCode, playerId) {
         room.order = room.order.filter((id) => id !== playerId);
 
         if (room.order.length === 0) {
-            clearTimeout(room.timer);
             delete rooms[roomCode];
             return;
         }
@@ -334,7 +298,6 @@ function handlePlayerLeft(roomCode, playerId) {
             io.to(roomCode).emit("roomClosed", {
                 message: "Not enough players left to continue."
             });
-            clearTimeout(room.timer);
             delete rooms[roomCode];
             return;
         }
@@ -360,7 +323,6 @@ function handlePlayerLeft(roomCode, playerId) {
     const remaining = aliveIds(room);
 
     if (remaining.length <= 1) {
-        clearTimeout(room.timer);
         room.winner = remaining[0] || null;
 
         io.to(roomCode).emit("gameOver", {
@@ -584,9 +546,8 @@ io.on("connection", (socket) => {
 
         const result = checkGuess(guess, target.code);
 
-        clearTimeout(room.timer);
-
-        // Result goes ONLY to the guesser -- never reveal it to the room.
+        // Send the result to the guesser. The same result is also sent with the
+        // opponent's move below so both players can see the full move history.
         socket.emit("guessResult", {
             guess,
             targetId,
@@ -595,11 +556,16 @@ io.on("connection", (socket) => {
             injured: result.injured
         });
 
+        // Show the opponent's complete move to everyone else, including the
+        // DEAD/INJURED result. This keeps both players' histories in sync.
         socket.to(roomCode).emit("opponentGuessed", {
             player: socket.id,
             playerName: room.players[socket.id].name,
             targetId,
-            targetName: target.name
+            targetName: target.name,
+            guess,
+            dead: result.dead,
+            injured: result.injured
         });
 
         if (result.dead === 4) {
@@ -644,8 +610,6 @@ io.on("connection", (socket) => {
             return;
         }
 
-        clearTimeout(room.timer);
-
         room.order.forEach((id) => {
             const p = room.players[id];
             p.code = null;
@@ -656,7 +620,6 @@ io.on("connection", (socket) => {
         room.turnIndex = 0;
         room.started = false;
         room.winner = null;
-        room.turnEndsAt = null;
         room.locked = true; // straight back into the code phase, no new joiners
 
         io.to(roomCode).emit("rematchStarted", roomSummary(room));
