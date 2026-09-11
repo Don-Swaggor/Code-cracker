@@ -189,6 +189,8 @@ function tryAutoStart(roomCode) {
     if (allReady) {
         room.started = true;
         room.turnIndex = 0;
+        room.playerTimeMs = {};
+        room.turnStartedAt = null;
 
         io.to(roomCode).emit("gameStarted", {
             turn: room.order[0],
@@ -225,6 +227,9 @@ function createRoom(socket, name, mode, maxPlayers) {
         turnIndex: 0,
         started: false,
         winner: null,
+        // Per-player elapsed thinking time. It only advances while that player is on turn.
+        playerTimeMs: {},
+        turnStartedAt: null,
     };
 
     socket.join(roomCode);
@@ -252,15 +257,38 @@ function startTurn(roomCode) {
 
     const currentId = room.order[room.turnIndex];
 
-    // No countdown or automatic timeout. A turn lasts until the player makes a guess.
+    if (!room.playerTimeMs) room.playerTimeMs = {};
+    if (room.playerTimeMs[currentId] == null) room.playerTimeMs[currentId] = 0;
+
+    // This is an elapsed timer, not a countdown. It runs only for the active player.
+    room.turnStartedAt = Date.now();
+
     io.to(roomCode).emit("turnStarted", {
-        turn: currentId
+        turn: currentId,
+        playerTimeMs: room.playerTimeMs[currentId],
+        turnStartedAt: room.turnStartedAt
     });
+}
+
+function stopCurrentTurnTimer(roomCode) {
+    const room = rooms[roomCode];
+    if (!room || !room.turnStartedAt) return;
+
+    const currentId = room.order[room.turnIndex];
+    if (currentId) {
+        if (!room.playerTimeMs) room.playerTimeMs = {};
+        if (room.playerTimeMs[currentId] == null) room.playerTimeMs[currentId] = 0;
+        room.playerTimeMs[currentId] += Math.max(0, Date.now() - room.turnStartedAt);
+    }
+
+    room.turnStartedAt = null;
 }
 
 function advanceTurn(roomCode) {
     const room = rooms[roomCode];
     if (!room || room.winner) return;
+
+    stopCurrentTurnTimer(roomCode);
 
     const nextIdx = nextAliveIndex(room, room.turnIndex);
     if (nextIdx === -1) return;
@@ -583,6 +611,7 @@ io.on("connection", (socket) => {
 
             if (remaining.length === 1) {
                 room.winner = remaining[0];
+                stopCurrentTurnTimer(roomCode);
 
                 io.to(roomCode).emit("gameOver", {
                     winner: remaining[0],
@@ -620,6 +649,8 @@ io.on("connection", (socket) => {
         room.turnIndex = 0;
         room.started = false;
         room.winner = null;
+        room.playerTimeMs = {};
+        room.turnStartedAt = null;
         room.locked = true; // straight back into the code phase, no new joiners
 
         io.to(roomCode).emit("rematchStarted", roomSummary(room));
