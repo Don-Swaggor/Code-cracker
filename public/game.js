@@ -106,7 +106,7 @@ function showToast(message) {
 // =================================
 
 function isValidCode(code) {
-    return /^\\d{4}$/.test(code) && new Set(code).size === 4;
+    return /^\d{4}$/.test(code) && new Set(code).size === 4;
 }
 
 
