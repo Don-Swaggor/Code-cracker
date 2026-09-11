@@ -577,7 +577,7 @@ io.on("connection", (socket) => {
         }
 
         if (!validCode(code)) {
-            socket.emit("errorMessage", "Your code must contain exactly 4 digits.");
+            socket.emit("errorMessage", "Enter 4 different digits with no repeats.");
             return;
         }
 
@@ -640,7 +640,7 @@ io.on("connection", (socket) => {
         }
 
         if (!validCode(guess)) {
-            socket.emit("errorMessage", "Enter exactly 4 digits.");
+            socket.emit("errorMessage", "Enter 4 different digits with no repeats.");
             return;
         }
 
