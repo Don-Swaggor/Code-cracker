@@ -22,6 +22,7 @@ const MAX_GROUP_PLAYERS = 5;
 
 // All active rooms
 const rooms = {};
+const RECONNECT_GRACE_MS = 10 * 60 * 1000;
 
 // ===============================
 // ROOM CODE
@@ -47,6 +48,10 @@ function generateRoomCode() {
 // ===============================
 // VALIDATE NAME
 // ===============================
+
+function createSessionId() {
+    return require("crypto").randomBytes(18).toString("hex");
+}
 
 function cleanName(name) {
     if (typeof name !== "string") {
@@ -146,7 +151,8 @@ function publicPlayers(room) {
             name: p.name,
             ready: p.ready,
             alive: p.alive,
-            isHost: id === room.hostId
+            isHost: id === room.hostId,
+            connected: p.connected !== false
         };
     });
 }
@@ -175,6 +181,19 @@ function roomSummary(room) {
         mode: room.mode,
         maxPlayers: room.maxPlayers,
         hostId: room.hostId,
+        players: publicPlayers(room)
+    };
+}
+
+function roomSnapshot(room) {
+    return {
+        ...roomSummary(room),
+        started: room.started,
+        winner: room.winner,
+        turn: room.started && !room.winner ? room.order[room.turnIndex] : null,
+        playerTimeMs: room.playerTimeMs || {},
+        turnStartedAt: room.turnStartedAt,
+        history: room.history || [],
         players: publicPlayers(room)
     };
 }
@@ -213,16 +232,19 @@ function createRoom(socket, name, mode, maxPlayers) {
         mode,
         maxPlayers: mode === "duo" ? 2 : maxPlayers,
         players: {
-            [socket.id]: {
-                id: socket.id,
+            [socket.sessionId]: {
+                id: socket.sessionId,
                 name,
                 code: null,
                 ready: false,
-                alive: true
+                alive: true,
+                connected: true,
+                disconnectTimer: null,
+                socketId: socket.id
             }
         },
-        order: [socket.id],
-        hostId: socket.id,
+        order: [socket.sessionId],
+        hostId: socket.sessionId,
         locked: false,
         turnIndex: 0,
         started: false,
@@ -230,6 +252,7 @@ function createRoom(socket, name, mode, maxPlayers) {
         // Per-player elapsed thinking time. It only advances while that player is on turn.
         playerTimeMs: {},
         turnStartedAt: null,
+        history: []
     };
 
     socket.join(roomCode);
@@ -355,7 +378,8 @@ function handlePlayerLeft(roomCode, playerId) {
 
         io.to(roomCode).emit("gameOver", {
             winner: room.winner,
-            reason: "opponentLeft"
+            reason: "opponentLeft",
+            history: room.history || []
         });
 
         return;
@@ -374,6 +398,46 @@ io.on("connection", (socket) => {
 
     console.log("Connected:", socket.id);
 
+    socket.sessionId = null;
+
+    // ===========================
+    // RESUME AFTER REFRESH / RECONNECT
+    // ===========================
+
+    socket.on("resumeGame", ({ roomCode, sessionId }) => {
+        if (typeof roomCode !== "string" || typeof sessionId !== "string") return;
+        roomCode = roomCode.trim().toUpperCase();
+        const room = rooms[roomCode];
+        if (!room || !room.players[sessionId]) {
+            socket.emit("resumeFailed");
+            return;
+        }
+
+        const player = room.players[sessionId];
+        if (player.disconnectTimer) {
+            clearTimeout(player.disconnectTimer);
+            player.disconnectTimer = null;
+        }
+        player.connected = true;
+        player.socketId = socket.id;
+        socket.sessionId = sessionId;
+        socket.roomCode = roomCode;
+        socket.join(roomCode);
+
+        socket.emit("gameResumed", {
+            roomCode,
+            playerId: sessionId,
+            name: player.name,
+            ...roomSnapshot(room)
+        });
+
+        socket.to(roomCode).emit("playerReconnected", { playerId: sessionId, name: player.name });
+
+        if (room.started && !room.winner && room.turnStartedAt == null) {
+            startTurn(roomCode);
+        }
+    });
+
     // ===========================
     // CREATE ROOM
     // ===========================
@@ -389,12 +453,14 @@ io.on("connection", (socket) => {
             return;
         }
 
+        socket.sessionId = createSessionId();
         const roomCode = createRoom(socket, name, mode, maxPlayers);
         const room = rooms[roomCode];
 
         socket.emit("roomCreated", {
             roomCode,
-            playerId: socket.id,
+            playerId: socket.sessionId,
+            sessionId: socket.sessionId,
             name,
             ...roomSummary(room)
         });
@@ -433,22 +499,28 @@ io.on("connection", (socket) => {
             return;
         }
 
-        room.players[socket.id] = {
-            id: socket.id,
+        socket.sessionId = createSessionId();
+
+        room.players[socket.sessionId] = {
+            id: socket.sessionId,
             name,
             code: null,
             ready: false,
-            alive: true
+            alive: true,
+            connected: true,
+            disconnectTimer: null,
+            socketId: socket.id
         };
 
-        room.order.push(socket.id);
+        room.order.push(socket.sessionId);
 
         socket.join(roomCode);
         socket.roomCode = roomCode;
 
         socket.emit("joinedRoom", {
             roomCode,
-            playerId: socket.id,
+            playerId: socket.sessionId,
+            sessionId: socket.sessionId,
             name,
             ...roomSummary(room)
         });
@@ -470,7 +542,7 @@ io.on("connection", (socket) => {
         const room = rooms[socket.roomCode];
 
         if (!room || room.mode !== "group" || room.locked) return;
-        if (room.hostId !== socket.id) return;
+        if (room.hostId !== socket.sessionId) return;
 
         if (room.order.length < MIN_GROUP_PLAYERS) {
             socket.emit(
@@ -509,7 +581,7 @@ io.on("connection", (socket) => {
             return;
         }
 
-        const player = room.players[socket.id];
+        const player = room.players[socket.sessionId];
         if (!player) return;
 
         player.code = code;
@@ -518,7 +590,7 @@ io.on("connection", (socket) => {
         socket.emit("codeAccepted");
 
         socket.to(roomCode).emit("opponentReady", {
-            playerId: socket.id,
+            playerId: socket.sessionId,
             name: player.name
         });
 
@@ -548,7 +620,7 @@ io.on("connection", (socket) => {
 
         const currentId = room.order[room.turnIndex];
 
-        if (currentId !== socket.id) {
+        if (currentId !== socket.sessionId) {
             socket.emit("errorMessage", "It is not your turn.");
             return;
         }
@@ -557,12 +629,12 @@ io.on("connection", (socket) => {
         let targetId = data && data.targetId;
 
         if (room.mode === "duo") {
-            targetId = room.order.find((id) => id !== socket.id);
+            targetId = room.order.find((id) => id !== socket.sessionId);
         }
 
         const target = room.players[targetId];
 
-        if (!target || !target.alive || targetId === socket.id) {
+        if (!target || !target.alive || targetId === socket.sessionId) {
             socket.emit("errorMessage", "Choose a valid target.");
             return;
         }
@@ -587,8 +659,18 @@ io.on("connection", (socket) => {
         // Show the opponent's complete move to everyone else, including the
         // DEAD/INJURED result. This keeps both players' histories in sync.
         socket.to(roomCode).emit("opponentGuessed", {
-            player: socket.id,
-            playerName: room.players[socket.id].name,
+            player: socket.sessionId,
+            playerName: room.players[socket.sessionId].name,
+            targetId,
+            targetName: target.name,
+            guess,
+            dead: result.dead,
+            injured: result.injured
+        });
+
+        room.history.push({
+            player: socket.sessionId,
+            playerName: room.players[socket.sessionId].name,
             targetId,
             targetName: target.name,
             guess,
@@ -603,7 +685,7 @@ io.on("connection", (socket) => {
             io.to(roomCode).emit("playerEliminated", {
                 playerId: targetId,
                 name: target.name,
-                by: socket.id,
+                by: socket.sessionId,
                 reason: "cracked"
             });
 
@@ -615,7 +697,8 @@ io.on("connection", (socket) => {
 
                 io.to(roomCode).emit("gameOver", {
                     winner: remaining[0],
-                    reason: "cracked"
+                    reason: "cracked",
+                    history: room.history || []
                 });
 
                 return;
@@ -651,6 +734,7 @@ io.on("connection", (socket) => {
         room.winner = null;
         room.playerTimeMs = {};
         room.turnStartedAt = null;
+        room.history = [];
         room.locked = true; // straight back into the code phase, no new joiners
 
         io.to(roomCode).emit("rematchStarted", roomSummary(room));
@@ -661,29 +745,46 @@ io.on("connection", (socket) => {
     // ===========================
 
     socket.on("leaveRoom", () => {
-
         const roomCode = socket.roomCode;
-
-        if (roomCode) {
-            handlePlayerLeft(roomCode, socket.id);
+        if (roomCode && socket.sessionId) {
+            handlePlayerLeft(roomCode, socket.sessionId);
             socket.leave(roomCode);
         }
-
         socket.roomCode = null;
     });
 
     // ===========================
-    // DISCONNECT
+    // DISCONNECT — keep the player in the room so refresh/reconnect works
     // ===========================
 
     socket.on("disconnect", () => {
-
         console.log("Disconnected:", socket.id);
 
         const roomCode = socket.roomCode;
-        if (!roomCode) return;
+        const sessionId = socket.sessionId;
+        if (!roomCode || !sessionId) return;
 
-        handlePlayerLeft(roomCode, socket.id);
+        const room = rooms[roomCode];
+        const player = room && room.players[sessionId];
+        if (!room || !player) return;
+
+        player.connected = false;
+        player.socketId = null;
+
+        // Pause an active player's timer while they are disconnected.
+        if (room.started && !room.winner && room.order[room.turnIndex] === sessionId) {
+            stopCurrentTurnTimer(roomCode);
+        }
+
+        io.to(roomCode).emit("playerDisconnected", { playerId: sessionId, name: player.name });
+
+        if (player.disconnectTimer) clearTimeout(player.disconnectTimer);
+        player.disconnectTimer = setTimeout(() => {
+            const currentRoom = rooms[roomCode];
+            const currentPlayer = currentRoom && currentRoom.players[sessionId];
+            if (!currentRoom || !currentPlayer || currentPlayer.connected) return;
+            handlePlayerLeft(roomCode, sessionId);
+        }, RECONNECT_GRACE_MS);
     });
 
 });
