@@ -1,0 +1,15 @@
+{
+  "name": "code-cracker",
+  "version": "3.0.0",
+  "description": "Online 2-player and 3-5 player group code-cracking game",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.3"
+  }
+}
