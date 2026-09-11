@@ -23,6 +23,11 @@
 
 <body>
 
+<div id="connectionBanner" class="connectionBanner hidden" role="status" aria-live="polite">
+    <span id="connectionIcon">⚠️</span>
+    <span id="connectionMessage">Connection lost. Trying to reconnect...</span>
+</div>
+
 <div class="app">
 
 
@@ -186,7 +191,7 @@
             <h2>🔐 CHOOSE YOUR CODE</h2>
 
             <p>
-                Choose a secret 4-digit code.
+                Choose a secret 4-digit code with no repeated digits.
             </p>
 
             <p class="small">
@@ -248,10 +253,10 @@
             </div>
 
 
-            <div class="timer">
+            <div class="clock" aria-label="Your turn time">
 
                 <span id="timer">
-                    30
+                    00:00
                 </span>
 
             </div>
@@ -290,8 +295,7 @@
             </h2>
 
             <p id="gameStatus">
-                Enter your guess.
-            </p>
+                Enter your guess using 4 different digits.
 
             <div id="targetSelect" class="targetSelect hidden">
                 <label>Choose your target</label>
@@ -325,11 +329,21 @@
                 📜 GAME HISTORY
             </h3>
 
-            <div id="history">
+            <div class="historyGrid">
 
-                <p class="empty">
-                    No guesses yet.
-                </p>
+                <div class="historyColumn">
+                    <h4>🎯 YOUR GUESSES</h4>
+                    <div id="myHistory" class="historyList">
+                        <p class="empty">No guesses yet.</p>
+                    </div>
+                </div>
+
+                <div class="historyColumn opponentHistoryColumn">
+                    <h4>👤 OPPONENT GUESSES</h4>
+                    <div id="opponentHistory" class="historyList">
+                        <p class="empty">No guesses yet.</p>
+                    </div>
+                </div>
 
             </div>
 

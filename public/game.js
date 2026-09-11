@@ -14,8 +14,32 @@ let maxPlayers = 2;
 let players = [];          // [{ id, name, ready, alive, isHost }]
 let currentTurn = null;
 let selectedTargetId = null;
-let timerInterval = null;
 let audioCtx = null;
+let myElapsedTimeMs = 0;
+let myTurnStartedAt = null;
+let timerInterval = null;
+
+const STORAGE_KEY = "codeCrackerSession";
+
+function saveSession() {
+    if (!roomCode || !myPlayer) return;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ roomCode, sessionId: myPlayer }));
+}
+
+function clearSession() {
+    localStorage.removeItem(STORAGE_KEY);
+}
+
+function tryResumeSession() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+        if (saved && saved.roomCode && saved.sessionId) {
+            socket.emit("resumeGame", saved);
+        }
+    } catch (_) {
+        clearSession();
+    }
+}
 
 
 // =================================
@@ -37,8 +61,12 @@ const guessInput = document.getElementById("guessInput");
 const guessBtn = document.getElementById("guessBtn");
 const turnBanner = document.getElementById("turnBanner");
 const timer = document.getElementById("timer");
-const historyEl = document.getElementById("history"); // renamed from `history` -- that name shadows window.history
+const myHistoryEl = document.getElementById("myHistory");
+const opponentHistoryEl = document.getElementById("opponentHistory");
 const toast = document.getElementById("toast");
+const connectionBanner = document.getElementById("connectionBanner");
+const connectionIcon = document.getElementById("connectionIcon");
+const connectionMessage = document.getElementById("connectionMessage");
 const groupSizeRow = document.getElementById("groupSizeRow");
 const groupSizeInput = document.getElementById("groupSizeInput");
 const startGroupBtn = document.getElementById("startGroupBtn");
@@ -70,6 +98,15 @@ function showToast(message) {
     setTimeout(() => {
         toast.classList.remove("show");
     }, 2500);
+}
+
+
+// =================================
+// CODE VALIDATION
+// =================================
+
+function isValidCode(code) {
+    return /^\\d{4}$/.test(code) && new Set(code).size === 4;
 }
 
 
@@ -192,6 +229,7 @@ socket.on("roomCreated", (data) => {
     players = data.players;
 
     document.getElementById("roomCodeDisplay").innerText = roomCode;
+    saveSession();
 
     renderLobby();
     showScreen("lobby");
@@ -206,11 +244,154 @@ socket.on("joinedRoom", (data) => {
     players = data.players;
 
     document.getElementById("roomCodeDisplay").innerText = roomCode;
+    saveSession();
 
     renderLobby();
     showScreen("lobby");
 });
 
+
+// =================================
+// RESUME GAME AFTER REFRESH
+// =================================
+
+function updateConnectionBanner(state, message) {
+    if (!connectionBanner) return;
+
+    connectionBanner.classList.remove("hidden", "reconnecting", "online");
+
+    if (state === "online") {
+        connectionBanner.classList.add("online");
+        connectionIcon.innerText = "✓";
+        connectionMessage.innerText = message || "Connection restored.";
+
+        setTimeout(() => {
+            connectionBanner.classList.add("hidden");
+        }, 1800);
+        return;
+    }
+
+    if (state === "offline") {
+        connectionIcon.innerText = "📡";
+        connectionMessage.innerText = message || "No internet connection detected. Check your network.";
+        return;
+    }
+
+    connectionBanner.classList.add("reconnecting");
+    connectionIcon.innerText = "⚠️";
+    connectionMessage.innerText = message || "Can't reach the game server. This may be a network issue or a temporary server problem. Retrying...";
+}
+
+socket.on("connect", () => {
+    updateConnectionBanner("online", "Connection restored. Checking your game...");
+    tryResumeSession();
+});
+
+socket.on("disconnect", (reason) => {
+    if (navigator.onLine === false) {
+        updateConnectionBanner("offline", "Your internet connection appears to be offline. The game will try again when you're back online.");
+    } else {
+        updateConnectionBanner("reconnecting", "Connection to the game server was lost. This may be a network issue or a temporary server problem. Retrying...");
+    }
+});
+
+socket.on("connect_error", () => {
+    if (navigator.onLine === false) {
+        updateConnectionBanner("offline", "No internet connection detected. Check your network connection.");
+    } else {
+        updateConnectionBanner("reconnecting", "Unable to reach the game server. Check your network connection. Retrying...");
+    }
+});
+
+socket.io.on("reconnect_attempt", () => {
+    updateConnectionBanner("reconnecting", "Trying to reconnect to the game server...");
+});
+
+socket.io.on("reconnect", () => {
+    updateConnectionBanner("online", "Connection restored. Resuming your game...");
+});
+
+socket.io.on("reconnect_failed", () => {
+    updateConnectionBanner("reconnecting", "Still unable to reach the game server. Check your network or try refreshing the page.");
+});
+
+window.addEventListener("offline", () => {
+    updateConnectionBanner("offline", "Your internet connection is offline. Your game session is being kept while we wait for the connection to return.");
+});
+
+window.addEventListener("online", () => {
+    updateConnectionBanner("reconnecting", "Internet connection restored. Reconnecting to the game server...");
+});
+
+socket.on("gameResumed", (data) => {
+    roomCode = data.roomCode;
+    myPlayer = data.playerId;
+    myName = data.name;
+    mode = data.mode;
+    maxPlayers = data.maxPlayers;
+    players = data.players || [];
+    currentTurn = data.turn || null;
+
+    document.getElementById("roomCodeDisplay").innerText = roomCode;
+    saveSession();
+
+    if (data.history) restoreHistory(data.history);
+
+    if (data.started) {
+        if (data.winner) {
+            renderGameOver({ winner: data.winner, reason: "restored", history: data.history || [] });
+            return;
+        }
+        showScreen("game");
+        renderGame();
+        startTimerForTurn({
+            playerTimeMs: Number(data.playerTimeMs?.[myPlayer] || 0),
+            turnStartedAt: data.turnStartedAt
+        });
+    } else if (data.locked) {
+        showScreen("code");
+        document.getElementById("codeStatus").innerText =
+            players.find(p => p.id === myPlayer)?.ready ? "Your code is locked. Waiting for the other player(s)..." : "Choose your secret code.";
+    } else {
+        renderLobby();
+        showScreen("lobby");
+    }
+
+    showToast("Game restored. You can continue playing.");
+});
+
+socket.on("resumeFailed", () => {
+    clearSession();
+    showToast("Your previous game could not be found on the server. It may have ended or the server was restarted.");
+});
+
+if (socket.connected) {
+    tryResumeSession();
+}
+
+function restoreHistory(history) {
+    myHistoryEl.innerHTML = "";
+    opponentHistoryEl.innerHTML = "";
+
+    const mine = history.filter(h => h.player === myPlayer);
+    const opponents = history.filter(h => h.player !== myPlayer);
+
+    if (!mine.length) myHistoryEl.innerHTML = `<p class="empty">No guesses yet.</p>`;
+    if (!opponents.length) opponentHistoryEl.innerHTML = `<p class="empty">No guesses yet.</p>`;
+
+    // History entries are rendered oldest -> newest because addHistoryEntry prepends.
+    mine.forEach(h => addHistoryEntry({
+        opponent: false,
+        targetName: mode === "group" ? h.targetName : null,
+        guess: h.guess, dead: h.dead, injured: h.injured
+    }));
+    opponents.forEach(h => addHistoryEntry({
+        opponent: true,
+        playerName: h.playerName,
+        targetName: mode === "group" ? h.targetName : null,
+        guess: h.guess, dead: h.dead, injured: h.injured
+    }));
+}
 
 // =================================
 // JOIN GAME
@@ -349,6 +530,7 @@ document.getElementById("copyBtn").onclick = async () => {
 
 document.getElementById("lobbyBackBtn").onclick = () => {
     socket.emit("leaveRoom");
+    clearSession();
     location.reload();
 };
 
@@ -361,8 +543,8 @@ document.getElementById("lockCodeBtn").onclick = () => {
 
     const code = secretInput.value;
 
-    if (!/^\d{4}$/.test(code)) {
-        showToast("Your code must contain exactly 4 digits.");
+    if (!isValidCode(code)) {
+        showToast("Use 4 different digits (no repeats).");
         return;
     }
 
@@ -392,6 +574,8 @@ socket.on("gameStarted", (data) => {
     players = data.players;
     mode = data.mode;
     currentTurn = data.turn;
+    myElapsedTimeMs = 0;
+    myTurnStartedAt = null;
 
     document.getElementById("myName").innerText = myName;
 
@@ -417,14 +601,14 @@ socket.on("gameStarted", (data) => {
 // =================================
 
 socket.on("turnStarted", (data) => {
-    currentTurn = data.turn;
-    updateTurn(data.turn);
-    startCountdown(data.endsAt);
-});
+    // If our turn just ended, freeze our accumulated time before switching.
+    if (currentTurn === myPlayer && data.turn !== myPlayer) {
+        stopMyTimer();
+    }
 
-socket.on("turnSkipped", (data) => {
-    const p = players.find(pl => pl.id === data.player);
-    showToast(`${p ? p.name : "A player"} ran out of time — turn skipped.`);
+    currentTurn = data.turn;
+    startTimerForTurn(data);
+    updateTurn(data.turn);
 });
 
 
@@ -535,33 +719,61 @@ function renderPlayersStatusBar() {
 }
 
 
-// =================================
-// TIMER
-// =================================
+function renderGame() {
+    const me = players.find(p => p.id === myPlayer);
+    const opponent = players.find(p => p.id !== myPlayer && p.alive) || players.find(p => p.id !== myPlayer);
 
-function startCountdown(endsAt) {
-
-    clearInterval(timerInterval);
-
-    function update() {
-        const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
-
-        timer.innerText = remaining;
-
-        if (remaining <= 5 && remaining > 0) {
-            beep(800, 50);
-        }
-
-        if (remaining <= 0) {
-            clearInterval(timerInterval);
-        }
-    }
-
-    update();
-
-    timerInterval = setInterval(update, 250);
+    document.getElementById("myName").innerText = me ? me.name : myName;
+    document.getElementById("opponentName").innerText = opponent ? opponent.name : "Opponent";
+    updateTurn(currentTurn);
 }
 
+// =================================
+// PLAYER TURN TIMER
+// =================================
+
+function formatElapsed(ms) {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    return hours > 0
+        ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+        : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function updateTurnTimer() {
+    const activeMs = currentTurn === myPlayer && myTurnStartedAt
+        ? Math.max(0, Date.now() - myTurnStartedAt)
+        : 0;
+
+    timer.innerText = formatElapsed(myElapsedTimeMs + activeMs);
+}
+
+function startTimerForTurn(data) {
+    myElapsedTimeMs = Number.isFinite(Number(data.playerTimeMs))
+        ? Number(data.playerTimeMs)
+        : 0;
+
+    myTurnStartedAt = currentTurn === myPlayer
+        ? Number(data.turnStartedAt) || Date.now()
+        : null;
+
+    updateTurnTimer();
+}
+
+function stopMyTimer() {
+    if (myTurnStartedAt) {
+        myElapsedTimeMs += Math.max(0, Date.now() - myTurnStartedAt);
+    }
+    myTurnStartedAt = null;
+    updateTurnTimer();
+}
+
+if (timerInterval) clearInterval(timerInterval);
+timerInterval = setInterval(updateTurnTimer, 250);
+updateTurnTimer();
 
 // =================================
 // MAKE GUESS
@@ -589,8 +801,8 @@ function makeGuess() {
 
     const guess = guessInput.value;
 
-    if (!/^\d{4}$/.test(guess)) {
-        showToast("Enter exactly 4 digits.");
+    if (!isValidCode(guess)) {
+        showToast("Enter 4 different digits (no repeats).");
         return;
     }
 
@@ -613,6 +825,7 @@ socket.on("guessResult", (data) => {
     selectedTargetId = null;
 
     addHistoryEntry({
+        opponent: false,
         targetName: mode === "group" ? data.targetName : null,
         guess: data.guess,
         dead: data.dead,
@@ -633,11 +846,15 @@ socket.on("guessResult", (data) => {
 
 socket.on("opponentGuessed", (data) => {
 
-    const notice = mode === "group"
-        ? `👤 ${data.playerName} guessed ${data.targetName}'s code.`
-        : "👤 Your opponent made a guess.";
-
-    addHistoryEntry({ notice });
+    // Opponent moves are fully visible: guess + DEAD + INJURED.
+    addHistoryEntry({
+        opponent: true,
+        playerName: data.playerName,
+        targetName: mode === "group" ? data.targetName : null,
+        guess: data.guess,
+        dead: data.dead,
+        injured: data.injured
+    });
 
     beep(300, 100);
 });
@@ -650,39 +867,47 @@ socket.on("opponentGuessed", (data) => {
 
 function addHistoryEntry(data) {
 
+    const historyEl = data.opponent ? opponentHistoryEl : myHistoryEl;
+    if (!historyEl) return;
+
     const empty = historyEl.querySelector(".empty");
     if (empty) empty.remove();
 
     const item = document.createElement("div");
     item.className = "historyItem";
 
-    if (data.notice) {
-        const notice = document.createElement("div");
-        notice.className = "opponentMove";
-        notice.innerText = data.notice;
-        item.appendChild(notice);
-
+    const label = document.createElement("div");
+    label.className = "opponentMove";
+    if (data.opponent) {
+        label.innerText = mode === "group"
+            ? `👤 ${data.playerName} guessed ${data.targetName}'s code`
+            : `👤 Your opponent guessed`;
+    } else if (data.targetName) {
+        label.innerText = `🎯 You guessed ${data.targetName}'s code`;
     } else {
-        const guessRow = document.createElement("div");
-        guessRow.className = "historyGuess";
-        guessRow.innerText = (data.targetName ? `→ ${data.targetName}: ` : "") + data.guess;
-        item.appendChild(guessRow);
-
-        const deadRow = document.createElement("div");
-        const deadSpan = document.createElement("span");
-        deadSpan.className = "dead";
-        deadSpan.innerText = `💀 Dead: ${data.dead}`;
-        deadRow.appendChild(deadSpan);
-        item.appendChild(deadRow);
-
-        const injuredRow = document.createElement("div");
-        const injuredSpan = document.createElement("span");
-        injuredSpan.className = "injured";
-        injuredSpan.innerText = `🩹 Injured: ${data.injured}`;
-        injuredRow.appendChild(injuredSpan);
-        item.appendChild(injuredRow);
+        label.innerText = "🎯 You guessed";
     }
+    item.appendChild(label);
 
+    const guessRow = document.createElement("div");
+    guessRow.className = "historyGuess";
+    guessRow.innerText = data.guess;
+    item.appendChild(guessRow);
+
+    const resultRow = document.createElement("div");
+    resultRow.className = "historyResult";
+
+    const deadSpan = document.createElement("span");
+    deadSpan.className = "dead";
+    deadSpan.innerText = `💀 Dead: ${data.dead}`;
+    resultRow.appendChild(deadSpan);
+
+    const injuredSpan = document.createElement("span");
+    injuredSpan.className = "injured";
+    injuredSpan.innerText = `🩹 Injured: ${data.injured}`;
+    resultRow.appendChild(injuredSpan);
+
+    item.appendChild(resultRow);
     historyEl.prepend(item);
 }
 
@@ -712,9 +937,8 @@ socket.on("playerEliminated", (data) => {
 // GAME OVER
 // =================================
 
-socket.on("gameOver", (data) => {
-
-    clearInterval(timerInterval);
+function renderGameOver(data) {
+    if (data.history) restoreHistory(data.history);
     showScreen("gameOver");
 
     const won = data.winner === myPlayer;
@@ -729,36 +953,28 @@ socket.on("gameOver", (data) => {
         title.innerText = "GAME OVER";
         icon.innerText = "🏳️";
         message.innerText = "The game ended with no winner.";
-
     } else if (won) {
         title.innerText = "🎉 YOU WON!";
         icon.innerText = "🏆";
-
-        if (data.reason === "timeout") {
-            message.innerText = "Your opponent ran out of time.";
-        } else if (data.reason === "opponentLeft") {
+        if (data.reason === "opponentLeft") {
             message.innerText = "You won because the other player(s) left.";
         } else {
             message.innerText = "You cracked the code!";
         }
-
         beep(1000, 400);
-
     } else {
         title.innerText = "💀 YOU LOST";
         icon.innerText = "💀";
-
-        if (data.reason === "timeout") {
-            message.innerText = "You ran out of time.";
-        } else if (data.reason === "opponentLeft") {
-            message.innerText = "You left or were disconnected earlier.";
+        if (data.reason === "opponentLeft") {
+            message.innerText = "The other player left or was disconnected.";
         } else {
             message.innerText = `${winnerName} cracked your code.`;
         }
-
         beep(200, 400);
     }
-});
+}
+
+socket.on("gameOver", renderGameOver);
 
 
 // =================================
@@ -780,7 +996,8 @@ socket.on("rematchStarted", (data) => {
     document.getElementById("lockCodeBtn").disabled = false;
     document.getElementById("codeStatus").innerText = "";
 
-    historyEl.innerHTML = `<p class="empty">No guesses yet.</p>`;
+    myHistoryEl.innerHTML = `<p class="empty">No guesses yet.</p>`;
+    opponentHistoryEl.innerHTML = `<p class="empty">No guesses yet.</p>`;
 
     showScreen("code");
 });
@@ -791,12 +1008,14 @@ socket.on("rematchStarted", (data) => {
 // =================================
 
 document.getElementById("homeBtn").onclick = () => {
+    clearSession();
     location.reload();
 };
 
 document.getElementById("leaveGameBtn").onclick = () => {
     if (confirm("Are you sure you want to leave?")) {
         socket.emit("leaveRoom");
+        clearSession();
         location.reload();
     }
 };
