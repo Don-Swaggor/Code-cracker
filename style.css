@@ -287,23 +287,20 @@ button:disabled {
 }
 
 /* =========================
-   LIVE CLOCK
+   TIMER
 ========================= */
-.clock {
-    min-width: 82px;
-    height: 48px;
-    padding: 0 10px;
-    border-radius: 12px;
+.timer {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
     display: flex !important;
     align-items: center;
     justify-content: center;
     background: #172554;
-    border: 2px solid #3b82f6;
+    border: 3px solid #3b82f6;
 }
-.clock span {
-    font-size: 16px;
-    font-weight: bold;
-    white-space: nowrap;
+.timer span {
+    font-size: 22px;
 }
 
 /* =========================
@@ -491,11 +488,4 @@ button:disabled {
         font-size: 25px;
         letter-spacing: 10px;
     }
-}
-
-/* Unique-digit hint */
-#codeStatus {
-    text-align: center;
-    color: #94a3b8;
-    margin-top: 10px;
 }

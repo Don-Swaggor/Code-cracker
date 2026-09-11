@@ -14,6 +14,7 @@ let maxPlayers = 2;
 let players = [];          // [{ id, name, ready, alive, isHost }]
 let currentTurn = null;
 let selectedTargetId = null;
+let timerInterval = null;
 let audioCtx = null;
 
 
@@ -69,15 +70,6 @@ function showToast(message) {
     setTimeout(() => {
         toast.classList.remove("show");
     }, 2500);
-}
-
-
-// =================================
-// CODE VALIDATION
-// =================================
-
-function isValidCode(code) {
-    return /^\\d{4}$/.test(code) && new Set(code).size === 4;
 }
 
 
@@ -369,8 +361,8 @@ document.getElementById("lockCodeBtn").onclick = () => {
 
     const code = secretInput.value;
 
-    if (!isValidCode(code)) {
-        showToast("Use 4 different digits (no repeats).");
+    if (!/^\d{4}$/.test(code)) {
+        showToast("Your code must contain exactly 4 digits.");
         return;
     }
 
@@ -427,6 +419,12 @@ socket.on("gameStarted", (data) => {
 socket.on("turnStarted", (data) => {
     currentTurn = data.turn;
     updateTurn(data.turn);
+    startCountdown(data.endsAt);
+});
+
+socket.on("turnSkipped", (data) => {
+    const p = players.find(pl => pl.id === data.player);
+    showToast(`${p ? p.name : "A player"} ran out of time — turn skipped.`);
 });
 
 
@@ -538,20 +536,32 @@ function renderPlayersStatusBar() {
 
 
 // =================================
-// LIVE CLOCK
+// TIMER
 // =================================
 
-function updateClock() {
-    const now = new Date();
+function startCountdown(endsAt) {
 
-    timer.innerText = now.toLocaleTimeString([], {
-        hour: "numeric",
-        minute: "2-digit"
-    });
+    clearInterval(timerInterval);
+
+    function update() {
+        const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+
+        timer.innerText = remaining;
+
+        if (remaining <= 5 && remaining > 0) {
+            beep(800, 50);
+        }
+
+        if (remaining <= 0) {
+            clearInterval(timerInterval);
+        }
+    }
+
+    update();
+
+    timerInterval = setInterval(update, 250);
 }
 
-updateClock();
-setInterval(updateClock, 1000);
 
 // =================================
 // MAKE GUESS
@@ -579,8 +589,8 @@ function makeGuess() {
 
     const guess = guessInput.value;
 
-    if (!isValidCode(guess)) {
-        showToast("Enter 4 different digits (no repeats).");
+    if (!/^\d{4}$/.test(guess)) {
+        showToast("Enter exactly 4 digits.");
         return;
     }
 
@@ -623,15 +633,11 @@ socket.on("guessResult", (data) => {
 
 socket.on("opponentGuessed", (data) => {
 
-    // Opponent moves are fully visible: guess + DEAD + INJURED.
-    addHistoryEntry({
-        opponent: true,
-        playerName: data.playerName,
-        targetName: mode === "group" ? data.targetName : null,
-        guess: data.guess,
-        dead: data.dead,
-        injured: data.injured
-    });
+    const notice = mode === "group"
+        ? `👤 ${data.playerName} guessed ${data.targetName}'s code.`
+        : "👤 Your opponent made a guess.";
+
+    addHistoryEntry({ notice });
 
     beep(300, 100);
 });
@@ -650,34 +656,7 @@ function addHistoryEntry(data) {
     const item = document.createElement("div");
     item.className = "historyItem";
 
-    if (data.opponent) {
-        const label = document.createElement("div");
-        label.className = "opponentMove";
-        label.innerText = mode === "group"
-            ? `👤 ${data.playerName} guessed ${data.targetName}'s code`
-            : `👤 Your opponent guessed`;
-        item.appendChild(label);
-
-        const guessRow = document.createElement("div");
-        guessRow.className = "historyGuess";
-        guessRow.innerText = data.guess;
-        item.appendChild(guessRow);
-
-        const deadRow = document.createElement("div");
-        const deadSpan = document.createElement("span");
-        deadSpan.className = "dead";
-        deadSpan.innerText = `💀 Dead: ${data.dead}`;
-        deadRow.appendChild(deadSpan);
-        item.appendChild(deadRow);
-
-        const injuredRow = document.createElement("div");
-        const injuredSpan = document.createElement("span");
-        injuredSpan.className = "injured";
-        injuredSpan.innerText = `🩹 Injured: ${data.injured}`;
-        injuredRow.appendChild(injuredSpan);
-        item.appendChild(injuredRow);
-
-    } else if (data.notice) {
+    if (data.notice) {
         const notice = document.createElement("div");
         notice.className = "opponentMove";
         notice.innerText = data.notice;
@@ -735,6 +714,7 @@ socket.on("playerEliminated", (data) => {
 
 socket.on("gameOver", (data) => {
 
+    clearInterval(timerInterval);
     showScreen("gameOver");
 
     const won = data.winner === myPlayer;
